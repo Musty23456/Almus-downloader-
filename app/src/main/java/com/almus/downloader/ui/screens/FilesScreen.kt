@@ -159,7 +159,6 @@ fun FilesScreen(
                     chooserTitle = chooserTitle,
                     viewModel = viewModel,
                     onPickFolder = { folderPicker.launch(null) },
-                    onSaveCopyName = { name -> saveCopyPicker.launch(name) },
                 )
             }
         }
@@ -173,7 +172,6 @@ private fun FileList(
     chooserTitle: String,
     viewModel: FilesViewModel,
     onPickFolder: () -> Unit,
-    onSaveCopyName: (String) -> Unit,
 ) {
     val view = state.view
     LazyColumn(
@@ -269,7 +267,7 @@ private fun FileList(
                     entry = entry,
                     onOpen = { viewModel.open(entry) },
                     onShare = { viewModel.share(entry, chooserTitle) },
-                    onSaveCopy = { viewModel.beginSaveCopy(entry)?.let(onSaveCopyName) },
+                    onSaveCopy = { viewModel.beginSaveCopy(entry)?.let { name -> saveCopyPicker.launch(name) } },
                     onDelete = { viewModel.requestDelete(entry) },
                     onRemove = { viewModel.removeFromList(entry) },
                 )
