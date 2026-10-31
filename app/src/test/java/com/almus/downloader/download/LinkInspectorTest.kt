@@ -1,7 +1,5 @@
 package com.almus.downloader.download
 
-import com.sun.net.httpserver.HttpExchange
-import com.sun.net.httpserver.HttpServer
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import kotlinx.coroutines.runBlocking
