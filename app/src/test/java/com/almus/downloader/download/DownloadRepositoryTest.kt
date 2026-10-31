@@ -144,12 +144,13 @@ class DownloadRepositoryTest {
 
     @Test fun sameNameGetsCounterButFailedNamesAreReusable() = runBlocking<Unit> {
         val first = started(repo.start(linkInfo("a.pdf")))
-        val second = started(repo.start(linkInfo("a.pdf")))
+        // Different links that happen to share a file name (the same link would be rejected as a duplicate).
+        val second = started(repo.start(linkInfo("a.pdf", url = "https://example.com/two/a.pdf")))
         assertEquals("a.pdf", row(first).fileName)
         assertEquals("a (1).pdf", row(second).fileName)
 
         repo.cancel(second)
-        val third = started(repo.start(linkInfo("a.pdf")))
+        val third = started(repo.start(linkInfo("a.pdf", url = "https://example.com/three/a.pdf")))
         assertEquals("a (1).pdf", row(third).fileName)
     }
 
