@@ -159,6 +159,7 @@ fun FilesScreen(
                     chooserTitle = chooserTitle,
                     viewModel = viewModel,
                     onPickFolder = { folderPicker.launch(null) },
+                    onSaveCopyName = { name -> saveCopyPicker.launch(name) },
                 )
             }
         }
