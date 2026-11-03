@@ -161,8 +161,20 @@ class SegmentedEngineTest {
     @Test fun mobileDataUsesFewerConnectionsThanEthernet() = runBlocking<Unit> {
         server.perConnectionBytesPerSec = 1_500_000
         network.flow.value = NetworkStatus(online = true, metered = true, kind = NetworkKind.Cellular)
-        assertExact(await(add(), EngineState.Completed))
-        assertTrue("cellular peak ${server.peakConcurrent}", server.peakConcurrent <= 3)
+        val ethernet = NetworkStatus(online = true, metered = false, kind = NetworkKind.Ethernet)
+        assertTrue(ConnectionPolicy.ceiling(network.flow.value, 0) < ConnectionPolicy.ceiling(ethernet, 0))
+        val id = add()
+        var peak = 0
+        withTimeout(30_000) {
+            engine.items.first { l ->
+                peak = maxOf(peak, l.firstOrNull { it.download.id == id }?.connections ?: 0)
+                l.any { it.download.id == id && it.download.state == EngineState.Completed }
+            }
+        }
+        assertExact(await(id, EngineState.Completed))
+        assertTrue("cellular peak $peak", peak <= 3)
+        // The server may still be closing the first (cancelled) request while the segments arrive, hence one extra.
+        assertTrue("cellular server peak ${server.peakConcurrent}", server.peakConcurrent <= 4)
     }
 
     // ------------------------------------------------------------------ servers that lie

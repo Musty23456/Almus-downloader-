@@ -17,6 +17,11 @@
 - `HttpHeaders.parseUnsatisfiedTotal` rewritten with a block body (same behaviour; the `return` inside an expression body is rejected by the Kotlin 2.0.21 compiler used for the tests here).
 - Two existing engine tests wait for the finished-callback instead of racing it.
 
+### Fixed (CI)
+- `TikTokSourceGuardTest.sourcesWereFound` expected at least 12 source files; the TikTok module has 11 (the number was copied from the YouTube guard). It now expects 11.
+- `SegmentedEngineTest.mobileDataUsesFewerConnectionsThanEthernet` counted the server's open requests, which include the first request that is cancelled once the segments start, so 3 segments could read as 4. It now checks the engine's own connection count (at most 3), the server peak with the same one-extra allowance as `neverReportsMoreConnectionsThanAllowed`, and that the cellular limit is below the Ethernet limit.
+- Test changes only; no engine or app code changed.
+
 ### Not changed
 - Room schema (segment progress lives in a manifest file next to the segments), permissions, dependencies, UI, the DownloadManager-based engine.
 

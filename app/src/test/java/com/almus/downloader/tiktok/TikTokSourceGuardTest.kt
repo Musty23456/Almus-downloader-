@@ -27,7 +27,7 @@ class TikTokSourceGuardTest {
         sources.filter { include(it.first) && pattern.containsMatchIn(it.second) }.map { File(it.first).name }.sorted()
 
     @Test fun sourcesWereFound() {
-        assertTrue(sources.size >= 12)
+        assertTrue("found ${sources.size} sources", sources.size >= 11)
         assertTrue(sources.any { it.first.endsWith("TikTokMetadataClient.kt") })
     }
 
