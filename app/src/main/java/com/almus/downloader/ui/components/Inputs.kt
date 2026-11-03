@@ -22,6 +22,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -58,6 +60,8 @@ fun AlmusTextField(
     keyboardType: KeyboardType = KeyboardType.Text,
     imeAction: ImeAction = ImeAction.Default,
     onImeAction: (() -> Unit)? = null,
+    /** Hides what is typed (for access tokens and other secrets). */
+    secret: Boolean = false,
 ) {
     OutlinedTextField(
         value = value,
@@ -88,7 +92,8 @@ fun AlmusTextField(
         isError = isError,
         singleLine = singleLine,
         maxLines = maxLines,
-        keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
+        visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
+        keyboardOptions = KeyboardOptions(keyboardType = if (secret) KeyboardType.Password else keyboardType, imeAction = imeAction),
         keyboardActions = KeyboardActions(onAny = { onImeAction?.invoke() }),
         shape = MaterialTheme.shapes.large,
         colors = almusTextFieldColors(),

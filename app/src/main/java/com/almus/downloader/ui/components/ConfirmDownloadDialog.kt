@@ -33,6 +33,8 @@ fun ConfirmDownloadDialog(
     onDismiss: () -> Unit,
     /** Folder the file will be saved in, e.g. "Download/ALMUS/Video". Not shown when null. */
     savePath: String? = null,
+    /** Where the link came from, e.g. "Source: direct link". Not shown when null. */
+    sourceLine: String? = null,
 ) {
     val host = runCatching { java.net.URL(info.finalUrl).host }.getOrDefault("")
     val warnings = LinkWarnings.of(info)
@@ -49,6 +51,7 @@ fun ConfirmDownloadDialog(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 DetailLine(stringResource(R.string.confirm_from, host))
+                if (sourceLine != null) DetailLine(sourceLine)
                 DetailLine(
                     if (info.contentLength >= 0) {
                         stringResource(R.string.confirm_size, ByteFormat.format(info.contentLength))

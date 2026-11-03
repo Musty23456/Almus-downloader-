@@ -66,6 +66,8 @@ data class DownloadItem(
     val errorMessage: String?,
     val category: FileCategory,
     val insecure: Boolean,
+    /** True for downloads of the new engine that can really be paused (shows a Pause button). */
+    val canPause: Boolean = false,
 )
 
 fun DownloadEntity.toItem(speed: SpeedInfo? = null): DownloadItem {

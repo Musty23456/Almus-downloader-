@@ -4,19 +4,38 @@ import android.app.Application
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.almus.downloader.AlmusApplication
 import com.almus.downloader.download.BulkAction
-import com.almus.downloader.download.InspectResult
 import com.almus.downloader.download.LinkInfo
+import com.almus.downloader.download.InspectResult
+import com.almus.downloader.media.CatalogResult
+import com.almus.downloader.media.DestinationChoice
+import com.almus.downloader.media.DirectFileSource
+import com.almus.downloader.media.DownloadPlan
+import com.almus.downloader.media.MediaCatalog
+import com.almus.downloader.media.MediaOptions
+import com.almus.downloader.media.MediaOptionsBuilder
+import com.almus.downloader.media.MediaSelection
+import com.almus.downloader.media.MediaVariant
+import com.almus.downloader.media.PlanBuilder
+import com.almus.downloader.media.SelectionLogic
+import com.almus.downloader.media.Destinations
 import com.almus.downloader.download.SaveFolders
 import com.almus.downloader.download.SaveLayout
 import com.almus.downloader.download.StartResult
+import com.almus.downloader.engine.EngineRequest
+import com.almus.downloader.engine.EngineState
+import com.almus.downloader.engine.EnqueueResult
 import com.almus.downloader.model.DownloadItem
 import com.almus.downloader.model.DownloadStatus
 import com.almus.downloader.model.FileCategory
+import com.almus.downloader.model.toDownloadItem
 import com.almus.downloader.model.toItem
+import com.almus.downloader.platform.IntakeResult
+import com.almus.downloader.platform.LinkDetection
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,10 +52,33 @@ sealed interface AddDownloadState {
 
     data object Checking : AddDownloadState
 
-    /** The link is reachable; waiting for the user to approve it. */
-    data class Confirm(val info: LinkInfo) : AddDownloadState
+    /** The link is reachable; waiting for the user to approve it. [detection] says which source it came from. */
+    data class Confirm(val info: LinkInfo, val detection: LinkDetection? = null) : AddDownloadState
+
+    /** A recognised platform page or a restricted link. It is explained to the user; nothing can be downloaded from it. */
+    data class Detected(val detection: LinkDetection) : AddDownloadState
 
     data class Error(val message: String) : AddDownloadState
+
+    /** Asking an authorized source (Internet Archive, Wikimedia Commons) which formats it really offers. */
+    data object Resolving : AddDownloadState
+
+    /**
+     * The real choices of a media item: only formats the source offers. [initial] restores the person's picks when they
+     * come back from the review screen.
+     */
+    data class Select(
+        val catalog: MediaCatalog,
+        val options: MediaOptions,
+        val detection: LinkDetection? = null,
+        val initial: MediaSelection? = null,
+    ) : AddDownloadState
+
+    /** Checking the chosen file (redirects, https, size) before the review screen. */
+    data class Verifying(val select: Select) : AddDownloadState
+
+    /** The confirmation screen. Nothing is saved before the person taps Download here. */
+    data class Review(val select: Select, val selection: MediaSelection, val plan: DownloadPlan) : AddDownloadState
 }
 
 /** An action waiting for the user's confirmation. [singleName] is set when it affects one download. */
@@ -52,8 +94,11 @@ class DownloadsViewModel(application: Application) : AndroidViewModel(applicatio
     private val settings = container.settings
 
     /** The list shown everywhere. Always derived from the database plus live speed data. */
-    val downloads: StateFlow<List<DownloadItem>> = combine(repository.downloads, repository.speeds) { rows, speeds ->
-        rows.map { it.toItem(speeds[it.id]) }
+    private val engineHost = container.engineHost
+
+    val downloads: StateFlow<List<DownloadItem>> = combine(repository.downloads, repository.speeds, engineHost.items) { rows, speeds, engine ->
+        // The new engine's downloads (shown with negative ids) come first, then the older engine's.
+        engine.map { it.toDownloadItem() } + rows.map { it.toItem(speeds[it.id]) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _addState = MutableStateFlow<AddDownloadState>(AddDownloadState.Idle)
@@ -71,45 +116,175 @@ class DownloadsViewModel(application: Application) : AndroidViewModel(applicatio
     private val _saveLayout = MutableStateFlow(container.saveSettings.layout)
     val saveLayout: StateFlow<SaveLayout> = _saveLayout.asStateFlow()
 
+    /** The new download engine needs Android 10+; on older versions the switch is disabled. */
+    val engineSupported: Boolean = engineHost.supported
+
+    private val _newEngine = MutableStateFlow(engineSupported && engineHost.settings.useNewEngine)
+    val newEngineEnabled: StateFlow<Boolean> = _newEngine.asStateFlow()
+
+    private val _wifiOnly = MutableStateFlow(engineHost.settings.wifiOnly)
+    val wifiOnly: StateFlow<Boolean> = _wifiOnly.asStateFlow()
+
+    private val _youtubeKeyHint = MutableStateFlow(container.youtubeKeys.hint())
+
+    /** Last four characters of the saved YouTube API key, or null when none is saved. */
+    val youtubeKeyHint: StateFlow<String?> = _youtubeKeyHint.asStateFlow()
+
+    private val _facebookTokenHint = MutableStateFlow(container.facebookTokens.hint())
+
+    /** Last four characters of the saved Facebook access token, or null when none is saved. */
+    val facebookTokenHint: StateFlow<String?> = _facebookTokenHint.asStateFlow()
+
     private var checkJob: Job? = null
     private var noticeJob: Job? = null
 
     // ------------------------------------------------------------------ adding
 
-    /** Step 1: validate, check for duplicates and inspect the link. Nothing is downloaded yet. */
-    fun checkLink(rawUrl: String) {
-        if (_addState.value is AddDownloadState.Checking) return
-        _addState.value = AddDownloadState.Checking
+    /**
+     * Step 1: detect the platform, follow short links safely, check for duplicates and ask the server.
+     * Nothing is downloaded yet. [skipPlatformCheck] is used when the user chose to check a recognised
+     * platform page as an ordinary link anyway; it never lifts a restriction.
+     */
+    fun checkLink(rawUrl: String, skipPlatformCheck: Boolean = false) {
+        val current = _addState.value
+        if (current is AddDownloadState.Checking || current is AddDownloadState.Resolving || current is AddDownloadState.Verifying) return
+        val matched = if (skipPlatformCheck) null else container.mediaSources.match(rawUrl)
+        _addState.value = if (matched != null) AddDownloadState.Resolving else AddDownloadState.Checking
         checkJob = viewModelScope.launch {
-            if (repository.isDuplicate(rawUrl)) {
-                _addState.value = AddDownloadState.Error("This link is already in your queue or downloading.")
+            if (matched != null) {
+                _addState.value = when (val result = matched.source.load(matched.key)) {
+                    is CatalogResult.Unavailable -> AddDownloadState.Error(result.message)
+                    is CatalogResult.Failed -> AddDownloadState.Error(result.message)
+                    is CatalogResult.Found -> selectStateFor(result.catalog, null) ?: AddDownloadState.Error("This item offers no audio or video formats that can be downloaded.")
+                }
                 return@launch
             }
-            _addState.value = when (val result = container.inspector.inspect(rawUrl)) {
-                is InspectResult.Success -> AddDownloadState.Confirm(result.info)
+            _addState.value = when (val result = container.linkIntake.check(rawUrl, skipPlatformCheck)) {
+                is IntakeResult.Rejected -> AddDownloadState.Error(result.message)
+                is IntakeResult.Detected -> AddDownloadState.Detected(result.detection)
+                is IntakeResult.Ready -> {
+                    val catalog = DirectFileSource.catalogOf(result.info)
+                    val select = catalog?.let { selectStateFor(it, result.detection) }
+                    select ?: AddDownloadState.Confirm(result.info, result.detection)
+                }
+            }
+        }
+    }
+
+    private fun selectStateFor(catalog: MediaCatalog, detection: LinkDetection?): AddDownloadState.Select? {
+        val options = MediaOptionsBuilder.build(catalog, container.audioConverters)
+        if (options.isEmpty) return null
+        return AddDownloadState.Select(catalog, options, detection)
+    }
+
+    /** True when the file can be put into a chosen folder per download (the new download engine). */
+    val perDownloadFolders: Boolean get() = engineSupported && _newEngine.value
+
+    /** The folder shown under "Save to" for a destination choice, before anything is checked. */
+    fun previewSavePath(variant: MediaVariant, destination: DestinationChoice): String {
+        val effective = if (perDownloadFolders) destination else DestinationChoice.Automatic
+        val fileName = variant.url.substringBefore('?').substringAfterLast('/')
+        val subfolder = Destinations.subfolder(effective, variant.kind, container.saveSettings.layout, fileName, variant.mimeType)
+        return SaveFolders.displayPath(container.storage.target(), subfolder)
+    }
+
+    /** From the selection screen: check the chosen file, then show the confirmation screen. */
+    fun reviewSelection(selection: MediaSelection) {
+        val state = _addState.value as? AddDownloadState.Select ?: return
+        val resolved = SelectionLogic.resolve(state.options, selection) ?: return
+        val effective = if (perDownloadFolders) selection else selection.copy(destination = DestinationChoice.Automatic)
+        fun planFor(info: LinkInfo) = PlanBuilder.build(
+            catalog = state.catalog,
+            resolved = resolved,
+            info = info,
+            destination = effective.destination,
+            layout = container.saveSettings.layout,
+            target = container.storage.target(),
+        )
+        val verified = state.catalog.verifiedInfo?.takeIf { it.url == resolved.variant.url }
+        if (verified != null) {
+            _addState.value = AddDownloadState.Review(state, effective, planFor(verified))
+            return
+        }
+        _addState.value = AddDownloadState.Verifying(state)
+        checkJob = viewModelScope.launch {
+            _addState.value = when (val result = container.inspector.inspect(resolved.variant.url)) {
+                is InspectResult.Success -> AddDownloadState.Review(state, effective, planFor(result.info))
                 is InspectResult.Failure -> AddDownloadState.Error(result.message)
             }
         }
+    }
+
+    /** From the confirmation screen: go back to the choices with the picks kept. */
+    fun backToSelection() {
+        val state = _addState.value as? AddDownloadState.Review ?: return
+        _addState.value = state.select.copy(initial = state.selection)
+    }
+
+    /** The person tapped Download on the confirmation screen. */
+    fun confirmPlan() {
+        val state = _addState.value as? AddDownloadState.Review ?: return
+        val plan = state.plan
+        if (plan.conversion != null) {
+            _addState.value = AddDownloadState.Error("Converting audio is not available in this version.")
+            return
+        }
+        _addState.value = AddDownloadState.Idle
+        viewModelScope.launch { begin(plan.info, plan.subfolder) }
+    }
+
+    /** Text-only recognition of a link (no network). Used for the hint under the address field. */
+    fun detectLink(rawUrl: String): LinkDetection = container.linkDetector.detect(rawUrl)
+
+    /** From the platform dialog: check the same link as an ordinary web link. Only offered for non-restricted pages. */
+    fun checkDetectedLinkAnyway() {
+        val state = _addState.value as? AddDownloadState.Detected ?: return
+        _addState.value = AddDownloadState.Idle
+        checkLink(state.detection.url ?: state.detection.input, skipPlatformCheck = true)
     }
 
     /** Step 2: the user approved what the dialog showed. */
     fun confirmDownload() {
         val state = _addState.value as? AddDownloadState.Confirm ?: return
         _addState.value = AddDownloadState.Idle
-        viewModelScope.launch {
-            when (val result = repository.start(state.info)) {
-                is StartResult.Started -> {
-                    showNotice(
-                        if (result.queued) {
-                            "Added to the queue. It starts when a download slot is free."
-                        } else {
-                            "Download started. Track it in the Downloads tab."
-                        },
-                    )
-                    repository.refresh()
-                }
-                is StartResult.Rejected -> _addState.value = AddDownloadState.Error(result.message)
+        val subfolder = SaveFolders.subfolderFor(container.saveSettings.layout, state.info.fileName, state.info.mimeType)
+        viewModelScope.launch { begin(state.info, subfolder) }
+    }
+
+    /** Starts an approved download. [subfolder] is used by the new engine; the older engine follows Settings. */
+    private suspend fun begin(info: LinkInfo, subfolder: String?) {
+        if (engineHost.supported && engineHost.settings.useNewEngine) {
+            startWithEngine(info, subfolder)
+            return
+        }
+        when (val result = repository.start(info)) {
+            is StartResult.Started -> {
+                showNotice(
+                    if (result.queued) {
+                        "Added to the queue. It starts when a download slot is free."
+                    } else {
+                        "Download started. Track it in the Downloads tab."
+                    },
+                )
+                repository.refresh()
             }
+            is StartResult.Rejected -> _addState.value = AddDownloadState.Error(result.message)
+        }
+    }
+
+    private suspend fun startWithEngine(info: LinkInfo, subfolder: String?) {
+        val request = EngineRequest(
+            url = info.url,
+            fileName = info.fileName,
+            mimeType = info.mimeType,
+            subfolder = subfolder,
+            insecure = info.insecure,
+            expectedSize = info.contentLength.takeIf { it > 0 },
+        )
+        when (val result = engineHost.enqueue(request)) {
+            is EnqueueResult.Added -> showNotice("Download started. Track it in the Downloads tab.")
+            is EnqueueResult.Duplicate -> _addState.value = AddDownloadState.Error("This link is already in your queue or downloading.")
+            is EnqueueResult.Rejected -> _addState.value = AddDownloadState.Error(result.message)
         }
     }
 
@@ -126,20 +301,29 @@ class DownloadsViewModel(application: Application) : AndroidViewModel(applicatio
 
     // ------------------------------------------------------------------ single-item actions
 
+    // Ids below zero belong to the new engine (see EngineItemMapping.kt).
+
     fun cancel(id: Long) {
-        viewModelScope.launch { repository.cancel(id) }
+        viewModelScope.launch { if (id < 0) engineHost.cancel(-id) else repository.cancel(id) }
     }
 
-    /** Only waiting downloads can be held: a running transfer cannot be paused. */
+    /** Old engine: only waiting downloads can be held. New engine: a running transfer is really paused. */
     fun hold(id: Long) {
-        viewModelScope.launch { repository.hold(id) }
+        viewModelScope.launch { if (id < 0) engineHost.pause(-id) else repository.hold(id) }
     }
 
     fun resume(id: Long) {
-        viewModelScope.launch { repository.resume(id) }
+        viewModelScope.launch { if (id < 0) engineHost.resume(-id) else repository.resume(id) }
     }
 
     fun retry(id: Long) {
+        if (id < 0) {
+            viewModelScope.launch {
+                engineHost.retry(-id)
+                showNotice("Download restarted.")
+            }
+            return
+        }
         viewModelScope.launch {
             when (val result = repository.retry(id)) {
                 is StartResult.Started -> {
@@ -153,7 +337,7 @@ class DownloadsViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** Removes a finished record from the list. The downloaded file stays on the device. */
     fun removeFromList(id: Long) {
-        viewModelScope.launch { repository.removeRecords(id) }
+        viewModelScope.launch { if (id < 0) engineHost.remove(-id) else repository.removeRecords(id) }
     }
 
     /** Asks for confirmation before deleting one downloaded file. */
@@ -163,6 +347,10 @@ class DownloadsViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** Opens a finished file in another app. Only ever called from a tap. Never opens APKs. */
     fun open(id: Long) {
+        if (id < 0) {
+            openEngineFile(-id)
+            return
+        }
         viewModelScope.launch {
             val entity = repository.get(id) ?: return@launch
             val item = entity.toItem()
@@ -196,6 +384,34 @@ class DownloadsViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    private fun openEngineFile(engineId: Long) {
+        val record = engineHost.items.value.firstOrNull { it.download.id == engineId }?.download ?: return
+        if (record.state != EngineState.Completed) return
+        val app = getApplication<Application>()
+        if (FileCategory.from(record.fileName, record.mimeType) == FileCategory.Apks) {
+            val intent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            runCatching { app.startActivity(intent) }
+            showNotice("APK files are never opened or installed by this app. Install it from your Downloads only if you trust the source.")
+            return
+        }
+        val uri = record.finalUri?.let { Uri.parse(it) }
+        if (uri == null) {
+            showNotice("The file is no longer available.")
+            return
+        }
+        val type = record.mimeType ?: app.contentResolver.getType(uri) ?: "*/*"
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, type)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            app.startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            showNotice("No app on this device can open this type of file.")
+        } catch (_: SecurityException) {
+            showNotice("This file could not be opened.")
+        }
+    }
+
     // ------------------------------------------------------------------ bulk actions
 
     /** Asks for confirmation. Nothing happens until [confirmPending]. */
@@ -214,35 +430,47 @@ class DownloadsViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch { runBulk(pending.action, pending.ids) }
     }
 
-    private suspend fun runBulk(action: BulkAction, ids: List<Long>) {
+    private suspend fun runBulk(action: BulkAction, allIds: List<Long>) {
+        // Ids below zero belong to the new engine; the rest to the older one.
+        val engineIds = allIds.filter { it < 0 }.map { -it }
+        val ids = allIds.filter { it > 0 }
         when (action) {
             BulkAction.CancelAll -> {
-                val n = repository.cancel(ids)
+                engineIds.forEach { engineHost.cancel(it) }
+                val n = repository.cancel(ids) + engineIds.size
                 showNotice("Cancelled $n download(s).")
             }
             BulkAction.HoldAll -> {
-                val n = repository.hold(ids)
-                showNotice("Put $n download(s) on hold. Downloads that are already running cannot be paused.")
+                engineIds.forEach { engineHost.pause(it) }
+                val n = repository.hold(ids) + engineIds.size
+                showNotice(
+                    "Put $n download(s) on hold." +
+                        if (ids.isNotEmpty()) " Downloads of the older engine that are already running cannot be paused." else "",
+                )
             }
             BulkAction.ResumeAll -> {
-                val n = repository.resume(ids)
+                engineIds.forEach { engineHost.resume(it) }
+                val n = repository.resume(ids) + engineIds.size
                 showNotice("Put $n download(s) back in the queue.")
             }
             BulkAction.RetryAll -> {
+                engineIds.forEach { engineHost.retry(it) }
                 val r = repository.retry(ids)
                 showNotice(
-                    "Retrying ${r.done} download(s)." +
+                    "Retrying ${r.done + engineIds.size} download(s)." +
                         if (r.skipped > 0) " Skipped ${r.skipped}: ${r.messages.firstOrNull() ?: "not eligible"}" else "",
                 )
             }
             BulkAction.ClearHistory -> {
-                val n = repository.removeRecords(ids)
+                engineIds.forEach { engineHost.remove(it) }
+                val n = repository.removeRecords(ids) + engineIds.size
                 showNotice("Removed $n item(s) from the list. The files were not deleted.")
             }
             BulkAction.DeleteFiles -> {
+                val engineDeleted = engineIds.count { engineHost.deleteFile(it) }
                 val r = repository.deleteFiles(ids)
                 showNotice(
-                    "Deleted ${r.done} file(s)." +
+                    "Deleted ${r.done + engineDeleted} file(s)." +
                         if (r.skipped > 0) " ${r.messages.firstOrNull() ?: "${r.skipped} could not be deleted."}" else "",
                 )
             }
@@ -255,13 +483,55 @@ class DownloadsViewModel(application: Application) : AndroidViewModel(applicatio
     fun setMaxConcurrent(value: Int) {
         settings.maxConcurrent = value
         _maxConcurrent.value = settings.maxConcurrent
-        viewModelScope.launch { repository.onSettingsChanged() }
+        viewModelScope.launch {
+            repository.onSettingsChanged()
+            engineHost.settingsChanged()
+        }
+    }
+
+    /** Switches new downloads to the new download engine (beta). Downloads that already exist keep their engine. */
+    fun setNewEngineEnabled(enabled: Boolean) {
+        if (!engineSupported) return
+        engineHost.settings.useNewEngine = enabled
+        _newEngine.value = enabled
+        if (enabled) engineHost.onAppVisible()
+    }
+
+    /** Used by the new engine: no transfer on mobile data. */
+    fun setWifiOnly(enabled: Boolean) {
+        engineHost.settings.wifiOnly = enabled
+        _wifiOnly.value = enabled
+        viewModelScope.launch { engineHost.settingsChanged() }
     }
 
     /** Applies to downloads that start from now on. Files that already exist are never moved. */
     fun setSaveLayout(layout: SaveLayout) {
         container.saveSettings.layout = layout
         _saveLayout.value = container.saveSettings.layout
+    }
+
+    /** Saves the person's own YouTube Data API key. Returns false (and saves nothing) when it has the wrong shape. */
+    fun saveYoutubeKey(raw: String): Boolean {
+        val saved = container.youtubeKeys.save(raw)
+        if (saved) _youtubeKeyHint.value = container.youtubeKeys.hint()
+        return saved
+    }
+
+    fun clearYoutubeKey() {
+        container.youtubeKeys.clear()
+        _youtubeKeyHint.value = null
+    }
+
+    /** Saves the person's own Facebook access token. Returns false (and saves nothing) when it has the wrong shape. */
+    fun saveFacebookToken(raw: String): Boolean {
+        val saved = container.facebookTokens.save(raw)
+        if (saved) _facebookTokenHint.value = container.facebookTokens.hint()
+        return saved
+    }
+
+    fun clearFacebookToken() {
+        container.facebookTokens.clear()
+        _facebookTokenHint.value = null
     }
 
     // ------------------------------------------------------------------ sync

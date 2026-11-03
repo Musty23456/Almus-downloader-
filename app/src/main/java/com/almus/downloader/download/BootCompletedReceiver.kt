@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.almus.downloader.AlmusApplication
+import com.almus.downloader.engine.android.ResumeScheduler
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -20,7 +21,13 @@ class BootCompletedReceiver : BroadcastReceiver() {
         val pending = goAsync()
         container.applicationScope.launch {
             try {
-                withTimeoutOrNull(RECEIVER_TIMEOUT_MS) { container.repository.reconcile() }
+                withTimeoutOrNull(RECEIVER_TIMEOUT_MS) {
+                    container.repository.reconcile()
+                    // New engine: do not start work from here (Android 15 forbids starting a dataSync
+                    // service at boot). Ask WorkManager to continue the downloads once a network exists.
+                    val host = container.engineHost
+                    if (host.supported && host.hasUnfinishedWork()) ResumeScheduler.schedule(context)
+                }
             } finally {
                 pending.finish()
             }

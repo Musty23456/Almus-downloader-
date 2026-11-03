@@ -21,10 +21,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -34,6 +37,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.almus.downloader.BuildConfig
 import com.almus.downloader.R
 import com.almus.downloader.ui.components.AlmusCard
+import com.almus.downloader.ui.components.AlmusTextField
 import com.almus.downloader.ui.components.ContentContainer
 import com.almus.downloader.ui.components.ScreenHeader
 import com.almus.downloader.ui.components.SectionHeader
@@ -50,6 +54,15 @@ fun SettingsScreen(
 ) {
     val maxConcurrent by viewModel.maxConcurrent.collectAsStateWithLifecycle()
     val saveLayout by viewModel.saveLayout.collectAsStateWithLifecycle()
+    val newEngine by viewModel.newEngineEnabled.collectAsStateWithLifecycle()
+    val wifiOnly by viewModel.wifiOnly.collectAsStateWithLifecycle()
+    val engineSupported = viewModel.engineSupported
+    val youtubeKeyHint by viewModel.youtubeKeyHint.collectAsStateWithLifecycle()
+    val youtubeKeyInput = remember { mutableStateOf("") }
+    val youtubeKeyError = remember { mutableStateOf(false) }
+    val facebookTokenHint by viewModel.facebookTokenHint.collectAsStateWithLifecycle()
+    val facebookTokenInput = remember { mutableStateOf("") }
+    val facebookTokenError = remember { mutableStateOf(false) }
     ContentContainer(modifier = modifier) {
         Column(
             modifier = Modifier
@@ -127,10 +140,16 @@ fun SettingsScreen(
                 }
                 SettingsDivider()
                 SettingRow(
+                    title = stringResource(R.string.pref_new_engine),
+                    description = stringResource(if (engineSupported) R.string.pref_new_engine_desc else R.string.pref_new_engine_unsupported),
+                    enabled = engineSupported,
+                ) { Switch(checked = newEngine, onCheckedChange = { viewModel.setNewEngineEnabled(it) }, enabled = engineSupported) }
+                SettingsDivider()
+                SettingRow(
                     title = stringResource(R.string.pref_wifi_only),
                     description = stringResource(R.string.pref_wifi_desc),
-                    enabled = false,
-                ) { Switch(checked = false, onCheckedChange = null, enabled = false) }
+                    enabled = engineSupported,
+                ) { Switch(checked = wifiOnly, onCheckedChange = { viewModel.setWifiOnly(it) }, enabled = engineSupported) }
                 SettingsDivider()
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                     Text(
@@ -162,6 +181,119 @@ fun SettingsScreen(
                     description = stringResource(R.string.pref_notifications_desc),
                     enabled = false,
                 ) { Switch(checked = false, onCheckedChange = null, enabled = false) }
+            }
+
+            // YouTube
+            SectionHeader(title = stringResource(R.string.yt_settings_header))
+            SettingsCard {
+                Column(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.yt_key_title),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = stringResource(R.string.yt_key_desc),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = if (youtubeKeyHint != null) {
+                            stringResource(R.string.yt_key_saved, youtubeKeyHint.orEmpty())
+                        } else {
+                            stringResource(R.string.yt_key_none)
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    AlmusTextField(
+                        value = youtubeKeyInput.value,
+                        onValueChange = {
+                            youtubeKeyInput.value = it
+                            youtubeKeyError.value = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = stringResource(R.string.yt_key_label),
+                        isError = youtubeKeyError.value,
+                        supportingText = if (youtubeKeyError.value) stringResource(R.string.yt_key_invalid) else null,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = {
+                                if (viewModel.saveYoutubeKey(youtubeKeyInput.value)) {
+                                    youtubeKeyInput.value = ""
+                                } else {
+                                    youtubeKeyError.value = true
+                                }
+                            },
+                            enabled = youtubeKeyInput.value.isNotBlank(),
+                        ) { Text(text = stringResource(R.string.yt_key_save)) }
+                        TextButton(
+                            onClick = { viewModel.clearYoutubeKey() },
+                            enabled = youtubeKeyHint != null,
+                        ) { Text(text = stringResource(R.string.yt_key_remove)) }
+                    }
+                }
+            }
+
+            // Facebook
+            SectionHeader(title = stringResource(R.string.fb_settings_header))
+            SettingsCard {
+                Column(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.fb_token_title),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = stringResource(R.string.fb_token_desc),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = if (facebookTokenHint != null) {
+                            stringResource(R.string.fb_token_saved, facebookTokenHint.orEmpty())
+                        } else {
+                            stringResource(R.string.fb_token_none)
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    AlmusTextField(
+                        value = facebookTokenInput.value,
+                        onValueChange = {
+                            facebookTokenInput.value = it
+                            facebookTokenError.value = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = stringResource(R.string.fb_token_label),
+                        isError = facebookTokenError.value,
+                        supportingText = if (facebookTokenError.value) stringResource(R.string.fb_token_invalid) else null,
+                        secret = true,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = {
+                                if (viewModel.saveFacebookToken(facebookTokenInput.value)) {
+                                    facebookTokenInput.value = ""
+                                } else {
+                                    facebookTokenError.value = true
+                                }
+                            },
+                            enabled = facebookTokenInput.value.isNotBlank(),
+                        ) { Text(text = stringResource(R.string.fb_token_save)) }
+                        TextButton(
+                            onClick = { viewModel.clearFacebookToken() },
+                            enabled = facebookTokenHint != null,
+                        ) { Text(text = stringResource(R.string.fb_token_remove)) }
+                    }
+                }
             }
 
             // About

@@ -40,6 +40,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -63,6 +64,8 @@ import com.almus.downloader.ui.components.AlmusCard
 import com.almus.downloader.ui.components.AlmusTextField
 import com.almus.downloader.ui.components.CategoryTile
 import com.almus.downloader.ui.components.ConfirmDownloadDialog
+import com.almus.downloader.ui.components.MediaFlowHost
+import com.almus.downloader.ui.components.LinkDetectionDialog
 import com.almus.downloader.ui.components.downloadActionsFor
 import com.almus.downloader.ui.components.DownloadCard
 import com.almus.downloader.ui.components.ContentContainer
@@ -105,7 +108,11 @@ fun HomeScreen(
     val urlValid = validation is UrlValidation.Valid
     val urlErrorText = (validation as? UrlValidation.Invalid)?.error?.message
     val urlError = trimmedUrl.isNotEmpty() && urlErrorText != null
-    val checking = addState is AddDownloadState.Checking
+    val checking = addState is AddDownloadState.Checking || addState is AddDownloadState.Resolving || addState is AddDownloadState.Verifying
+    // Text-only recognition while typing: nothing is opened and no network is used.
+    val detectionHint = remember(trimmedUrl) {
+        if (urlValid) viewModel.detectLink(trimmedUrl).hint else null
+    }
     val wide = isWideLayout()
 
     val startCheck = { if (urlValid && !checking) viewModel.checkLink(trimmedUrl) }
@@ -117,11 +124,14 @@ fun HomeScreen(
 
     val actions = downloadActionsFor(viewModel)
 
+    MediaFlowHost(viewModel)
+
     val confirm = addState as? AddDownloadState.Confirm
     if (confirm != null) {
         ConfirmDownloadDialog(
             info = confirm.info,
             savePath = viewModel.savePathFor(confirm.info),
+            sourceLine = confirm.detection?.sourceLine,
             showNotificationHint = Permissions.needsNotificationPermission(context),
             onConfirm = {
                 val missing = Permissions.missing(context)
@@ -133,6 +143,15 @@ fun HomeScreen(
                 }
             },
             onDismiss = { viewModel.dismissAddState() },
+        )
+    }
+
+    (addState as? AddDownloadState.Detected)?.let { detected ->
+        LinkDetectionDialog(
+            detection = detected.detection,
+            onCheckAnyway = { viewModel.checkDetectedLinkAnyway() },
+            onDismiss = { viewModel.dismissAddState() },
+            onUseLink = { viewModel.checkLink(it) },
         )
     }
 
@@ -218,7 +237,7 @@ fun HomeScreen(
                         placeholder = stringResource(R.string.url_placeholder),
                         leadingIcon = Icons.Filled.Link,
                         isError = urlError,
-                        supportingText = if (urlError) urlErrorText else null,
+                        supportingText = if (urlError) urlErrorText else detectionHint,
                         keyboardType = KeyboardType.Uri,
                         imeAction = ImeAction.Go,
                         onImeAction = { startCheck() },

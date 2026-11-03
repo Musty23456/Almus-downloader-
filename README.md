@@ -8,7 +8,14 @@ An Android download manager, built in phases.
 - **Phase 4** – advanced download management: queue, concurrency, hold/resume of queued items, bulk actions, speed and ETA, safe delete.
 - **Phase 5** – local file manager for the files this app downloaded.
 - **Phase 6** – in-app browser (Android WebView) with safe defaults, routed into the existing download flow.
-- **Phase 7 (this version, 0.7.0)** – audio and video downloads for ordinary files that servers offer for download: link inspection, streaming/live refusal with explanations, folder choice, "Save a copy to…".
+- **Advanced media selection (this version, 0.14.0)** – audio and video from authorized sources (Internet Archive, Wikimedia Commons, direct files) open a selection screen with the formats the source really offers (quality, format, size or labelled estimate, length, details), a destination folder and a confirmation screen. Nothing is invented; no conversion ships. See [docs/MEDIA_SELECTION.md](docs/MEDIA_SELECTION.md).
+- **Platform integrations (0.13.0)** – Instagram, X/Twitter, Vimeo, Dailymotion, Reddit and Pinterest content links open one shared dialog with what each platform's own public oEmbed service shares (title, creator, length, thumbnail where given), what kind of media it is, the official ways to open it in the platform, why downloading is not available, and the platform's own tools for your own content. One spec per platform on the existing adapter architecture; **no downloading, no sign-in, no scraping**: see [docs/PLATFORM_INTEGRATIONS.md](docs/PLATFORM_INTEGRATIONS.md).
+- **TikTok integration (0.12.0)** – TikTok video links (including short links, which are resolved safely) open a dialog with the caption, creator and thumbnail from TikTok's own public oEmbed service, ways to open the video in TikTok, why downloading is not available, and TikTok's own tools for your own videos. **No TikTok downloading**: see [docs/TIKTOK_INTEGRATION.md](docs/TIKTOK_INTEGRATION.md).
+- **Facebook integration (0.11.0)** – Facebook video, Reel and live links open a dialog with what Facebook's official services return (public status and size; title, owner and thumbnail with your own token), ways to open them in Facebook, and the official export for your own videos. Restricted content (groups, stories) can be opened in Facebook but is never bypassed. See [docs/FACEBOOK_INTEGRATION.md](docs/FACEBOOK_INTEGRATION.md).
+- **YouTube integration (0.10.0)** – YouTube video links open a dialog with the public title, thumbnail, channel and duration from YouTube's own services (oEmbed, and the Data API with the person's own key), the official ways to watch (YouTube app, youtube.com, share), and a clear explanation of why downloading is not available. **No YouTube downloading**: see [docs/YOUTUBE_INTEGRATION.md](docs/YOUTUBE_INTEGRATION.md).
+- **Download engine (0.9.0)** – new streaming engine with real pause/resume, Range-checked resume, automatic retry, restart recovery, notifications and a queue. Off by default (Settings), Android 10+; the DownloadManager engine is unchanged.
+- **Smart Link Detection (0.8.0)** – recognises YouTube, Facebook, TikTok, Instagram, X/Twitter, Vimeo, Dailymotion, Reddit, Pinterest and direct links before anything is downloaded; explains pages that are not files; follows short links safely. Detection only: no extraction from platform pages.
+- **Phase 7 (0.7.0)** – audio and video downloads for ordinary files that servers offer for download: link inspection, streaming/live refusal with explanations, folder choice, "Save a copy to…".
 
 The **AI Assistant** is still a layout preview. It is unchanged.
 
@@ -236,12 +243,132 @@ The project now carries a test (`NoTranscodingGuardTest`) that fails if any extr
 ### Phase 7 tests (new)
 `MediaFormatsTest`, `StreamingFormatsTest`, `SaveLocationTest`, `MediaTypesTest`, `MediaWarningsTest`, `MediaSaveLocationRepositoryTest`, `FileCopierTest`, `FileCopyPolicyTest`, `LinkInspectorMediaTest` (real HTTP against two local servers: MP4/WebM/M4A/MP3, generic types, all five redirect codes, cross-host and `../` redirects, HLS/DASH/playlist/live refusals, 401/404, resume headers) and `NoTranscodingGuardTest`.
 
+## Download engine (0.9.0)
+
+**What it is.** A new download engine that streams files itself over HTTP(S) with OkHttp, next to the existing one (Android `DownloadManager`). It is **off by default**: Settings > Downloads > **New download engine (beta)** switches *new* downloads to it. The older engine and all its code are unchanged and remain the default until the new one has been tested on devices. The new engine needs **Android 10 (API 29) or newer**; on older versions the switch is disabled and nothing changes.
+
+### What it does
+| Requirement | How |
+|---|---|
+| Background downloads | Foreground service (type dataSync) started only from something the user does; stops itself when idle |
+| Real pause / resume | Pause stops the transfer and keeps the partial file (its slot is freed); resume asks the server for the rest with `Range` |
+| Verify server support before resuming | Before any request the planner (`ResumePlanner`) refuses hopeless resumes (server said `Accept-Ranges: none`, no way to check the file did not change). After the request the answer is checked: 206 with a matching `Content-Range` continues; 200 (Range or `If-Range` not honoured) restarts from zero; 416 either finishes or restarts |
+| Servers without partial downloads | Detected (`Accept-Ranges: none` or a 200 answer to a Range request) and handled by restarting from zero |
+| Automatic retry | Exponential delay (2 s, 4 s, ... capped at 60 s), `Retry-After` honoured, 5 tries; only 408/429/500/502/503/504 and connection errors are retried (403/404 and similar fail at once). The counter resets only when a download reaches new ground, so a server that always cuts at the same place cannot loop forever |
+| Network interruptions | Offline (or Wi-Fi only on mobile data): transfers wait without using up retries and continue when a usable network returns |
+| Recovery after restart | Every download and its partial file are saved (Room table `engine_downloads`). On start, interrupted ones continue from the partial file; a partial file that already has every byte is just published |
+| Queue and simultaneous downloads | FIFO queue; limit = the existing "Simultaneous downloads" setting (1 to 5), read every time a slot frees |
+| Speed and time remaining | Existing `SpeedEstimator`; shown in the list and in the notification |
+| Progress notifications | One ongoing notification per download with Pause / Resume / Cancel buttons, plus a summary for the foreground service; finished/failed notifications |
+| Cancellation | Stops the transfer, deletes the partial file |
+| Duplicate detection | Same address (fragment and default port ignored) already queued, running, paused or waiting is refused |
+| File size validation | Received bytes must equal the announced size when one is known; shorter means retry, longer means start again; the file is never published otherwise |
+| Interrupted connections | The partial file only grows at its end and is truncated to the saved offset before each resume; nothing is published until it is complete |
+| Persistence | Room (migration 1 to 2, no history lost) |
+
+### Safety
+Redirects are followed by the engine itself (`HttpSession`), never by OkHttp: max 5 hops, no circles, never https to http, never from a public address to a local-network address, every hop validated. Only these request headers are ever sent: User-Agent, Accept-Encoding (`identity`), Accept, Range, If-Range. No cookies, no login data, no referrer. Source tests enforce this. Nothing here downloads from platform pages: the link detection of 0.8.0 still decides what may be offered.
+
+### Architecture (package `com.almus.downloader.engine`)
+| File | Role |
+|---|---|
+| `DownloadEngine` | Queue, state machine, transfer, retry, recovery. No Android classes |
+| `EnginePorts` | Interfaces: `EngineStore`, `FinalStorage`, `NetworkMonitor`, `EngineSettings`, `HttpTransport` |
+| `HttpSession`, `OkHttpTransport` | Safe redirects; OkHttp lives in this one file |
+| `ResumePlanner`, `RetryPolicy`, `HttpHeaders` | Pure decision logic |
+| `android/*` | Room store, MediaStore storage, network monitor, notifications, foreground service, resume worker, `EngineHost` |
+
+Partial files live in the app's private storage (`parts/dl-<id>.part`, a name the engine makes itself). A complete file is copied into `Download/ALMUS` (or `Video` / `Audio`) with MediaStore as "pending", then made visible. WorkManager (`ResumeWorker`, expedited, needs a network) continues downloads after a restart or when Android ends the foreground service (Android 15 limits dataSync services to about 6 hours); nothing is started from the boot broadcast itself.
+
+### Behaviour and limits you should know
+- **Completed downloads of the new engine appear in the Downloads tab (open, remove, delete) but not in the Files tab**, which still reads the older table. Not done in this phase.
+- No segmented (multi-connection) downloads, no speed limit, no scheduling.
+- A paused or retrying download is not "running", so it does not hold a slot.
+- When Android 15 ends the foreground service, running downloads go back to the queue and the worker continues them. That path cannot be tested without a device.
+- Dependencies added: OkHttp 4.12.0, WorkManager 2.9.1 (and the notification permissions FOREGROUND_SERVICE, FOREGROUND_SERVICE_DATA_SYNC, ACCESS_NETWORK_STATE). No vulnerability scan could be run (no network); both are widely used releases, but they are not the newest.
+- Room now exports its schema to `app/schemas` on the first build. **Commit that file.** The migration SQL was written by hand to match the entity and has never been run.
+
+### Manual test guide (device, Android 10 or newer)
+1. Settings > Downloads > turn on **New download engine (beta)**. Add a large file (a few hundred MB) from a server you control or a speed-test file.
+2. The download shows speed and time left; the notification shows progress with Pause and Cancel.
+3. **Pause** from the card and from the notification: the speed disappears, the status becomes "On hold", the file size on screen stops growing. **Resume**: it continues from the same place (not from zero).
+4. Turn on airplane mode during a download: it shows "Waiting for a network connection."; turn it off: it continues by itself.
+5. Turn on **Download on Wi-Fi only** and switch to mobile data: it waits; back on Wi-Fi it continues.
+6. Swipe the app away during a download (or force-stop, then reopen): the download is still listed and continues.
+7. Restart the phone with an unfinished download: open the app (or wait for the resume work); it continues.
+8. Set Simultaneous downloads to 1 and add three downloads: one runs, two wait; pausing the running one starts the next.
+9. Cancel a download: the partial file is removed (Settings > Apps > Storage should not grow).
+10. When a download finishes, the file is in Download/ALMUS (and Video/Audio if that layout is chosen) and opens from the card.
+Please report anything that differs, with the Android version and device.
+
+### Tests (new, 80)
+`DownloadEngineTest` (41, real OkHttp against a local server that can refuse Range, cut connections, answer 503/404/416, change its file and be slow: resume, no-range servers, changed file, pause/resume, cancel, retry and give-up, offline and Wi-Fi only, concurrency limit and order, duplicates, redirects, recovery after a "crash", orphan files), `HttpSessionTest` (10), `ResumePlannerTest` (9), `HttpHeadersTest` (7), `EngineSourceGuardTest` (6), `EngineStateTest` (4), `RetryPolicyTest` (3). `NoTranscodingGuardTest` was extended on purpose (OkHttp group allowed; `If-Range` allowed); it still forbids converters, extractor libraries, other dependencies and any other request header.
+
+## Smart Link Detection (0.8.0)
+
+**What it is.** A text-only step that runs before the existing link check. It tells the user what a link is (platform, kind, id), whether it is a direct file, a page that is not a file, or restricted, and explains why in plain language. **It is detection, not downloading.** It adds no downloader, no extractor, no permission and no library, and it never makes a platform page downloadable. It does not sign in, does not bypass authentication, DRM, paywalls, privacy settings or any platform restriction (a source-reading test fails if cookie/login handling, converting APIs or extractor libraries appear).
+
+### What the user sees
+- Under the address field on Home, a one-line hint appears as soon as the link is valid (for example "YouTube video · not a direct file", "Direct link · MP4 video file").
+- **Direct file / ordinary web link:** the existing flow continues unchanged (server check, confirmation, DownloadManager). The confirmation now also shows a "Source:" line.
+- **Platform page (video, post, profile, playlist ...):** a dialog explains what the link is and that Almus Downloader saves files a server offers directly, not videos taken out of platform pages. Platform-specific notes are shown (for example that Vimeo owners can make videos private or not downloadable). A **Check as a normal link** button runs the old behaviour (ask the server; you would get the page's HTML), so no earlier ability was removed.
+- **Restricted** (sign-in page, stories, private groups, DRM/paid, temporary player streams, streaming manifests on platform file hosts, or a platform answering 401/403/404/410): an explanation only. It cannot be forced.
+- **Blocked** (`javascript:`, `data:`, `file:`, `intent:` and similar, or a username/password inside the address) and **invalid** links get a clear message. Nothing is opened.
+- **Short links** (t.co, fb.watch, vm.tiktok.com, pin.it, Reddit share links, Facebook/Instagram share links): the redirects are followed safely to learn the real address, which is then detected again.
+
+### Safe redirect checking (`SafeRedirectResolver`)
+Only http/https; every hop validated; at most 5 hops; no circles; never https to http; never from a public address to a local-network address; HEAD first (one-byte ranged GET if HEAD is refused); the response body is never read; only User-Agent, Accept-Encoding, Accept and Range are sent (no cookies, no login data, no referrer). The only network contact is with the short link's own server, started by the user pressing the button.
+
+### Architecture (package `com.almus.downloader.platform`)
+| File | Role |
+|---|---|
+| `MediaPlatformAdapter` | The common interface: `platform`, `brandTokens`, `ownsHost`, `classify`, `describe`, `notesFor`. Adapters only read text. |
+| `adapters/*Adapter.kt` | One independent adapter per platform (YouTube, Facebook, TikTok, Instagram, X, Vimeo, Dailymotion, Reddit, Pinterest) plus `DirectLinkAdapter` as the fallback. A test fails if one adapter refers to another. |
+| `SmartLinkDetector` | Validates with the existing `UrlValidator`, picks the adapter, maps to a `LinkVerdict`, builds messages and safety notes. |
+| `UrlSafety`, `ParsedUrl`, `AdapterSupport` | Text-only host checks (exact/sub-domain match so `youtube.com.evil.com` is not YouTube), parsing, shared helpers. |
+| `SafeRedirectResolver`, `LinkIntake` | Safe redirects; the whole decision flow (detect, resolve, stop at pages, duplicates, server check), testable without Android. |
+
+To add a platform: write one `XxxAdapter : MediaPlatformAdapter`, add it to `SmartLinkDetector.defaultAdapters`, add lines to `src/test/resources/link_vectors.tsv`.
+
+### Behaviour change to know about
+Before, pasting a YouTube watch-page link led to the confirmation dialog with a "web page" warning. Now it leads to the explanation dialog first; "Check as a normal link" gives the old result.
+
+### Limits
+- Recognition is by address patterns only; platforms change their addresses, so an unrecognised address falls back to the normal server check (it is never wrongly blocked for being unrecognised).
+- Private, deleted or age-restricted content cannot be known from the address alone; it is reported only if a short-link check saw a 401/403/404/410.
+- Messages are English and live in Kotlin (like the existing error messages), not in `strings.xml`; only the two dialog buttons are string resources.
+- Country domains of Pinterest are an allow-list; an unlisted one is treated as an ordinary web link.
+- Nothing here downloads video or audio from any platform page. That is intentionally not part of this feature.
+
+### Manual test guide (device or emulator)
+1. Paste `https://www.youtube.com/watch?v=dQw4w9WgXcQ`: hint under the field says "YouTube video · not a direct file"; tap Download: the explanation dialog opens; Close. Nothing is queued.
+2. Same link, **Check as a normal link**: the old confirmation appears (with the web-page warning).
+3. Paste `https://www.instagram.com/stories/someone/1/`: restricted explanation, no override button.
+4. Paste a real direct file link (for example a PDF): "Direct link" hint, then the normal confirmation with "Source: direct link".
+5. Paste a `t.co` short link to a file: the app resolves it, then shows the normal confirmation.
+6. Type `javascript:alert(1)`: the field shows the validator message; nothing opens.
+7. In the Browser tab, start a download of a file: the same flow runs.
+
+### Tests (new, 78)
+`LinkVectorsTest` (128 shared vectors in `src/test/resources/link_vectors.tsv`), `SmartLinkDetectorTest`, `UrlSafetyTest`, `ParsedUrlTest`, `SafeRedirectResolverTest` (scripted fake connections, no network, body never readable), `LinkIntakeTest`, `PlatformSourceGuardTest`.
+
+## YouTube integration (0.10.0)
+
+Full description, limitations and manual test guide: **[docs/YOUTUBE_INTEGRATION.md](docs/YOUTUBE_INTEGRATION.md)**.
+
+In short: a plain YouTube video, Short or live link now opens a dedicated dialog (package `com.almus.downloader.youtube`).
+It shows what YouTube's official services say about the video, offers the official ways to watch it, handles
+deleted, private, age-restricted, region-restricted, live and unreachable cases with explanations, and states why the
+video cannot be saved. Duration and the age/region flags need a free YouTube Data API v3 key that the person adds in
+**Settings → YouTube**. There is no YouTube download: the app has no code for streams, players, signatures, cookies or
+sign-in, and `YouTubeSourceGuardTest` fails the build if any appears. No new permissions or dependencies.
+
 ## Verify a successful build
 
 1. **Push** to GitHub (steps below). Open **Actions**, then the latest **Android Build** run. Every step must be green:
    *Run unit tests*, *Upload unit test reports*, *Build debug APK*, *Upload debug APK*, *Verify APK (version and permissions)*.
-2. **Unit tests:** download the **almus-unit-test-reports** artifact and open `index.html`. Expect **374 tests, 0 failures** (this is the number of `@Test` methods in the project at this version).
-3. **APK check (automatic):** the *Verify APK* step prints the package line (it must show `versionName='0.7.0'` and `versionCode='7'`) and the permissions, and fails the build if `INTERNET`, `POST_NOTIFICATIONS` or `RECEIVE_BOOT_COMPLETED` is missing, or if any broad storage permission or `REQUEST_INSTALL_PACKAGES` is present. `WRITE_EXTERNAL_STORAGE` appears with `maxSdkVersion='28'`.
+2. **Unit tests:** download the **almus-unit-test-reports** artifact and open `index.html`. Expect **532 tests, 0 failures** (this is the number of `@Test` methods in the project at this version).
+3. **APK check (automatic):** the *Verify APK* step prints the package line (it must show `versionName='0.12.0'` and `versionCode='12'`) and the permissions, and fails the build if `INTERNET`, `POST_NOTIFICATIONS` or `RECEIVE_BOOT_COMPLETED` is missing, or if any broad storage permission or `REQUEST_INSTALL_PACKAGES` is present. `WRITE_EXTERNAL_STORAGE` appears with `maxSdkVersion='28'`.
 4. **Install** `app-debug.apk` from the **almus-downloader-debug-apk** artifact on a phone or emulator (Android 8.0+).
 5. **Browser test:** follow the *Manual test guide* in the in-app browser section above (about 10 minutes).
 6. **Smoke test** of the file manager (about 5 minutes):
@@ -300,7 +427,16 @@ Run: `./gradlew testDebugUnitTest` (HTML report: `app/build/reports/tests/testDe
 
 **Not covered by any automated test (needs a device or emulator):** the real file probe, the SAF folder picker and `DocumentsContract` calls, the open/share intents and chooser, the Files screen and its dialogs, the real `DownloadManager` transfer and its own redirect/cleartext handling, `DownloadManager.remove()` really deleting the file, the Settings chips, the Actions menu and dialogs, the boot receiver, Room on a real database, the notification and its permission prompts, the runtime-permission dialogs, scoped-storage destination, the broadcast receiver, the Compose screens, the Open button on real files.
 
-### Status of this build (Phase 7)
+### Status of this build (YouTube integration, 0.10.0)
+Written **without a Kotlin compiler, Android SDK, Gradle or network access**: **not compiled, and none of the 574 tests (42 new) have been run.** What was done: bracket-balance checks of every changed file (two reports were checker artifacts: a `'"'` character literal and a count already off by one in the original file); a check that every `yt_*` string resource used exists and `strings.xml` is valid XML; emulation of the existing `NoTranscodingGuardTest` rules and of the new `YouTubeSourceGuardTest` rules over the real sources (no hits; the only hosts are `www.googleapis.com` and `www.youtube.com`; the only headers are `User-Agent`, `Accept` and `x-goog-api-key`); and a line-by-line review of each test's expected values against the code. The live YouTube services were not contacted, and the dialog, Settings field, intents and thumbnail loading have never run on a device. **Run the GitHub Actions build first and send me the first failure.**
+
+### Status of the 0.9.0 build (download engine)
+Written **without a Kotlin compiler, Android SDK, Gradle or network access**: **not compiled, and none of the 532 tests (80 new) have been run.** The engine logic has not been executed anywhere. What was done: brace/parenthesis balance of every changed file; emulation of the existing source-guard rules over all main sources (no hits; request headers are only User-Agent, Accept-Encoding, Accept, Range, If-Range); a review of every engine path against the integration tests; and a review that found and fixed a retry-loop flaw before release (retries used to restart on any progress). The Room migration, the foreground service, the notifications, MediaStore saving and the resume worker need a device. **Run the GitHub Actions build first and send me the first failure.**
+
+### Status of the 0.8.0 build (Smart Link Detection)
+Also written **without a Kotlin compiler, Android SDK, Gradle or network access**: **not compiled, and none of the 452 tests (78 new) have been run.** What was run: brace-balance checks on every changed file; an emulation of the existing source guard rules over all main sources (no hits; request headers used are only User-Agent, Accept-Encoding, Accept, Range); and an independent Python port of the adapter rules run against the 128 shared vectors (it found and led to the fix of one real bug, `instagram.com/share/reel/...`; now 128 of 128 agree). The port shows the expected values and the logic are consistent, **not** that the Kotlin compiles or that the Compose UI works. The first GitHub Actions run is the real compile and test run, and the UI was never run on a device.
+
+### Status of the Phase 7 build
 The Phase 7 code was also written **without a Kotlin compiler, Android SDK, Gradle or network access**. It has **not been compiled and the Kotlin tests have not been run by the author**. What was actually run: (a) static checks (string resources, XML validity, imports, cross-file symbols); (b) a Python mirror of the new detection, folder and inspector logic run against a real local HTTP server with the same scenarios and expected values as the Kotlin tests (43 checks passed); (c) a Java program confirming the JDK `HttpServer`/`HttpURLConnection` behaviours the new tests rely on (13 checks passed). Those show the expected values and the JDK behaviour are right, not that the Kotlin compiles. The first GitHub Actions run is the real compile and test run.
 
 ### Status of the earlier build
@@ -349,6 +485,8 @@ app/src/main/java/com/almus/downloader/
 ├── browser/                     AddressResolver, NavigationPolicy, DownloadRouting (+ prompt throttle), JavaScriptPolicy,
 │                                HostKey, BrowserErrors, BrowserState (state + reducer), BrowserWebView (hardened WebView
 │                                + clients), ExternalOpen, SharedPrefsBrowserStore
+├── youtube/                     YouTube integration: links, official metadata client, viewing options, download policy,
+│                                android/ (OkHttp, thumbnail, opener, key store); see docs/YOUTUBE_INTEGRATION.md
 ├── model/                       FileCategory, DownloadItem (+status/filter, entity mapping), ChatMessage
 ├── navigation/                  Destinations
 └── ui/                          theme, components (cards, dialogs, inputs), screens (BrowserScreen), DownloadsViewModel, BrowserViewModel
@@ -356,5 +494,5 @@ app/src/test/java/.../download/  unit tests and fakes
 ```
 
 ## Versions
-Android Gradle Plugin 8.7.3, Gradle 8.9, Kotlin 2.0.21, KSP 2.0.21-1.0.28, Room 2.6.1, Lifecycle 2.8.7, Coroutines 1.9.0, Compose BOM 2024.12.01, Navigation Compose 2.8.5, minSdk 26, compile/target SDK 35. App version 0.7.0.
+Android Gradle Plugin 8.7.3, Gradle 8.9, Kotlin 2.0.21, KSP 2.0.21-1.0.28, Room 2.6.1, Lifecycle 2.8.7, Coroutines 1.9.0, Compose BOM 2024.12.01, Navigation Compose 2.8.5, minSdk 26, compile/target SDK 35. App version 0.12.0.
 # Almus-downloader-

@@ -51,7 +51,8 @@ class NoTranscodingGuardTest {
     }
 
     @Test fun onlyPlainRequestHeadersAreEverSet() {
-        val allowed = setOf("User-Agent", "Accept-Encoding", "Accept", "Range")
+        // If-Range is the standard condition that makes a resume safe (it carries the saved ETag or date, nothing personal).
+        val allowed = setOf("User-Agent", "Accept-Encoding", "Accept", "Range", "If-Range")
         val used = sources.flatMap { (_, text) ->
             Regex("(?:setRequestProperty|addRequestHeader)\\s*\\(\\s*\"([^\"]+)\"").findAll(text).map { it.groupValues[1] }.toList()
         }.toSet()
@@ -63,7 +64,9 @@ class NoTranscodingGuardTest {
         val catalog = firstExisting("../gradle/libs.versions.toml", "gradle/libs.versions.toml").readText()
         val groups = Regex("group\\s*=\\s*\"([^\"]+)\"").findAll(catalog).map { it.groupValues[1] }.toList()
         assertTrue("no libraries found in the version catalog", groups.isNotEmpty())
-        val unreviewed = groups.filterNot { it.startsWith("androidx.") || it == "org.jetbrains.kotlinx" || it == "junit" }
+        val unreviewed = groups.filterNot { it.startsWith("androidx.") || it == "org.jetbrains.kotlinx" || it == "junit" ||
+                // OkHttp (Apache-2.0): the download engine's HTTP client; reviewed in the Phase 2 notes.
+                it == "com.squareup.okhttp3" }
         assertEquals("add a safety and licence review before allowing: $unreviewed", emptyList<String>(), unreviewed)
 
         val build = firstExisting("build.gradle.kts", "app/build.gradle.kts").readText()

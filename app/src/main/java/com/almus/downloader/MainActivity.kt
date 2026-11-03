@@ -50,6 +50,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // New download engine: load saved downloads and continue unfinished ones (does nothing before Android 10).
+        (application as AlmusApplication).container.engineHost.onAppVisible()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)

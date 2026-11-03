@@ -372,6 +372,8 @@ fun DownloadCard(
                     CardButton(R.string.action_cancel) { actions.onCancel(item) }
                 }
                 DownloadStatus.Queued, DownloadStatus.Active, DownloadStatus.Paused -> {
+                    // Only downloads of the new engine can really be paused.
+                    if (item.canPause) CardButton(R.string.action_pause) { actions.onHold(item) }
                     CardButton(R.string.action_cancel) { actions.onCancel(item) }
                 }
                 DownloadStatus.OnHold -> {

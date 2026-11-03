@@ -25,8 +25,8 @@ android {
         applicationId = "com.almus.downloader"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.7.0"
+        versionCode = 14
+        versionName = "0.14.0"
     }
 
     signingConfigs {
@@ -77,6 +77,11 @@ android {
     }
 }
 
+ksp {
+    // Room writes its schema here so every database version can be checked by a migration test.
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.core.ktx)
@@ -92,6 +97,8 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
+    implementation(libs.okhttp)
+    implementation(libs.androidx.work.runtime.ktx)
 
     testImplementation(libs.junit)
 }

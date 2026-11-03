@@ -212,7 +212,7 @@ class LinkInspector(
 
     companion object {
         const val MAX_REDIRECTS = 5
-        const val USER_AGENT = "ALMUS-Downloader/0.7 (Android)"
+        const val USER_AGENT = "ALMUS-Downloader/0.9 (Android)"
         private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
     }
 }

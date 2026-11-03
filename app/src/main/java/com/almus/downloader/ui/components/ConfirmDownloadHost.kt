@@ -25,10 +25,22 @@ fun ConfirmDownloadHost(viewModel: DownloadsViewModel) {
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { _ -> viewModel.confirmDownload() }
 
+    (addState as? AddDownloadState.Detected)?.let { detected ->
+        LinkDetectionDialog(
+            detection = detected.detection,
+            onCheckAnyway = { viewModel.checkDetectedLinkAnyway() },
+            onDismiss = { viewModel.dismissAddState() },
+            onUseLink = { viewModel.checkLink(it) },
+        )
+    }
+
+    MediaFlowHost(viewModel)
+
     val confirm = addState as? AddDownloadState.Confirm ?: return
     ConfirmDownloadDialog(
         info = confirm.info,
         savePath = viewModel.savePathFor(confirm.info),
+        sourceLine = confirm.detection?.sourceLine,
         showNotificationHint = Permissions.needsNotificationPermission(context),
         onConfirm = {
             val missing = Permissions.missing(context)

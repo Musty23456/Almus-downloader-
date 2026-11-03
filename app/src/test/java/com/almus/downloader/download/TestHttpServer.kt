@@ -15,6 +15,9 @@ import java.util.concurrent.CopyOnWriteArrayList
 class HttpExchange(
     private val socket: Socket,
     val requestMethod: String,
+    /** Request headers, names in lower case. */
+    val requestHeaders: Map<String, String> = emptyMap(),
+    val requestPath: String = "/",
 ) {
     class Headers {
         private val values = LinkedHashMap<String, String>()
@@ -69,7 +72,10 @@ class HttpExchange(
         403 -> "Forbidden"
         404 -> "Not Found"
         405 -> "Method Not Allowed"
+        416 -> "Range Not Satisfiable"
+        429 -> "Too Many Requests"
         500 -> "Internal Server Error"
+        503 -> "Service Unavailable"
         else -> "Status"
     }
 }
@@ -114,15 +120,18 @@ class HttpServer private constructor(private val socket: ServerSocket) {
             client.soTimeout = 5_000
             val reader = client.getInputStream().bufferedReader(Charsets.ISO_8859_1)
             val requestLine = reader.readLine() ?: return
+            val requestHeaders = LinkedHashMap<String, String>()
             while (true) {
                 val line = reader.readLine() ?: break
                 if (line.isEmpty()) break
+                val colon = line.indexOf(':')
+                if (colon > 0) requestHeaders[line.substring(0, colon).trim().lowercase()] = line.substring(colon + 1).trim()
             }
             val parts = requestLine.split(' ')
             if (parts.size < 2) return
             val path = parts[1].substringBefore('?')
             val handler = contexts.filter { path.startsWith(it.first) }.maxByOrNull { it.first.length }?.second
-            val exchange = HttpExchange(client, parts[0])
+            val exchange = HttpExchange(client, parts[0], requestHeaders, parts[1])
             if (handler == null) {
                 exchange.sendResponseHeaders(404, -1)
                 exchange.close()
